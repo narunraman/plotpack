@@ -43,13 +43,24 @@ is never captured. Scripts and notebook source can still contain private informa
 Review the source, supplied data, parameters and notes before distributing figures.
 
 ```python
-plotpack.save(fig, "public-curve", data=df, source=False, include_git=False)
+plotpack.save(fig, "public-curve", data=df, source=False)
 ```
 
 For an existing image, use `plotpack attach image.png --data points.csv --no-source --no-git`.
-Git provenance otherwise records commit, dirty state and relative source path; it
-omits remote URLs and branch names. Environment metadata records Python and relevant
-package versions.
+Environment metadata records Python and relevant package versions.
+
+## The same figure, the same bytes
+
+By default `plotpack.save` records only what determines the figure: its data, source,
+parameters and package versions. Saving the same figure again gives byte-identical files,
+and a file whose bytes would not change is not rewritten. A figure kept in git then shows as
+changed only when what it shows has changed. (PDFs and SVGs get no creation date, SVG ids are
+fixed, and font subsets in PDFs get names derived from their characters.)
+
+`stamp=True` also records when the figure was made and the git commit, dirty state and
+relative path of its source. Remote URLs and branch names are never recorded. Use it for
+figures that live outside git, where nothing else would remember where they came from.
+`plotpack attach` stamps unless given `--no-git`.
 
 Each data item has a default 25 MB embedding limit. Larger tables keep up to 1,000
 rows plus a full-data hash; samples that exceed the limit are omitted. Oversized

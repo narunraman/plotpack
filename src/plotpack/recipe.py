@@ -193,7 +193,7 @@ def environment() -> dict[str, Any]:
 # -- build / read -------------------------------------------------------------------
 _README = """# {name}
 
-Recipe for a figure, made with plotpack on {created}.
+Recipe for a figure, made with plotpack{created}.
 
 - `manifest.json`: what's in here, with SHA-256 hashes, git state and package versions
 - `source/`: the code that drew the figure{source_note}
@@ -214,11 +214,20 @@ def _loader(item: dict) -> str:
     return f"- `{item['name']}`: `{line}`" + (" (sample only)" if item.get("truncated") else "")
 
 
+def _put(z: zipfile.ZipFile, path: str, content: bytes | str) -> None:
+    # A fixed date on every member: the same contents always make the same bytes.
+    info = zipfile.ZipInfo(path, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o644 << 16
+    z.writestr(info, content)
+
+
 def build_recipe(*, name: str, data: list[DataItem], source: tuple[str, bytes, str] | None,
                  params: Mapping[str, Any] | None = None, git: dict | None = None,
-                 outputs: list[str] | None = None, notes: str | None = None) -> bytes:
-    """`source` is (filename, content, kind) where kind is "file" or "notebook"."""
-    created = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+                 outputs: list[str] | None = None, notes: str | None = None, stamp: bool = False) -> bytes:
+    """`source` is (filename, content, kind) where kind is "file" or "notebook". With `stamp`, the
+    recipe also records when it was made; without, the same inputs always give the same bytes."""
+    created = datetime.now(timezone.utc).replace(microsecond=0).isoformat() if stamp else None
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
         "name": name,
@@ -237,21 +246,21 @@ def build_recipe(*, name: str, data: list[DataItem], source: tuple[str, bytes, s
         if source:
             fname, content, kind = source
             spath = f"source/{_safe_name(fname)}"
-            z.writestr(spath, content)
+            _put(z, spath, content)
             manifest["source"] = {"path": spath, "kind": kind, "bytes": len(content), "sha256": _sha256(content)}
         for it in data:
             entry = {"name": it.name, "path": f"data/{it.filename}", "bytes": len(it.content),
                      "sha256": _sha256(it.content) if it.content else None, **it.meta}
             if it.content:
-                z.writestr(entry["path"], it.content)
+                _put(z, entry["path"], it.content)
             manifest["data"].append(entry)
         readme = _README.format(
-            name=name, created=created,
+            name=name, created=f" on {created}" if created else "",
             source_note=f" (`{manifest['source']['path']}`)" if manifest["source"] else " (none captured)",
             loaders="\n".join(_loader(d) for d in manifest["data"]) or "- (no data attached)",
         )
-        z.writestr("README.md", readme)
-        z.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n")
+        _put(z, "README.md", readme)
+        _put(z, "manifest.json", json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n")
     recipe = buf.getvalue()
     with open_recipe(recipe):
         pass

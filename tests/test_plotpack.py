@@ -124,7 +124,7 @@ def test_git_state_recorded(fig, tmp_path):
                     "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
                     "commit", "-qm", "init"], cwd=repo, check=True)
-    m = plotpack.inspect(plotpack.save(fig, "g", source=script, out=tmp_path)["png"])
+    m = plotpack.inspect(plotpack.save(fig, "g", source=script, out=tmp_path, stamp=True)["png"])
     assert len(m["git"]["commit"]) == 40 and m["git"]["dirty"] is False
     assert m["git"]["path_in_repo"] == "make_fig.py" and m["source"]["kind"] == "file"
     assert "branch" not in m["git"] and "remote" not in m["git"]
@@ -256,3 +256,14 @@ def test_attach_missing_data_file_is_clean(fig, tmp_path, capsys):
     assert "Traceback" not in capsys.readouterr().err
 
 
+
+
+def test_the_same_figure_gives_the_same_bytes(fig, tmp_path):
+    first = plotpack.save(fig, "same", data={"curve": [1, 2]}, params={"seed": 1}, out=tmp_path)
+    before = {k: (p.read_bytes(), p.stat().st_mtime_ns) for k, p in first.items()}
+    again = plotpack.save(fig, "same", data={"curve": [1, 2]}, params={"seed": 1}, out=tmp_path)
+    assert {k: (p.read_bytes(), p.stat().st_mtime_ns) for k, p in again.items()} == before, "unchanged files are not rewritten"
+    m = plotpack.inspect(again["pdf"])
+    assert m["created_utc"] is None and m["git"] is None
+    changed = plotpack.save(fig, "same", data={"curve": [1, 3]}, params={"seed": 1}, out=tmp_path)
+    assert changed["pdf"].read_bytes() != before["pdf"][0], "new data, new bytes"

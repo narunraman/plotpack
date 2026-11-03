@@ -29,7 +29,7 @@ def _human(n) -> str:
 
 
 def _print_manifest(m: dict) -> None:
-    print(f"{m.get('name')}  ({m.get('schema')}, created {m.get('created_utc')})")
+    print(f"{m.get('name')}  ({m.get('schema')}" + (f", created {m['created_utc']}" if m.get("created_utc") else "") + ")")
     src = m.get("source")
     print(f"  source   {src['path']} ({src.get('kind')})" if src else "  source   (none captured)")
     g = m.get("git")

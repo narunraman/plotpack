@@ -14,17 +14,19 @@ package versions + hashes), recoverable from that one file:
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import io
 import sys
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from .embed import NoRecipe, embed_file, extract_bytes, extract_file
+from .embed import NoRecipe, embed_bytes, embed_file, extract_bytes, extract_file
 from .recipe import (DEFAULT_MAX_DATA_BYTES, build_recipe, git_state, normalise_data, open_recipe,
                      read_manifest, verify as _verify_bytes)
 
 __all__ = ["save", "attach", "inspect", "unpack", "verify", "read_table", "load_recipe", "NoRecipe"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def _source(path: Path) -> tuple[str, bytes, str]:
@@ -69,7 +71,7 @@ def _caller_source(stack_depth: int) -> tuple[tuple[str, bytes, str] | None, Pat
 
 def save(fig, name: str, data: Any = None, *, params: Mapping[str, Any] | None = None,
          out: str | Path = "figures", formats: Iterable[str] = ("pdf", "png", "svg"),
-         source: str | Path | None | bool = None, include_git: bool = True,
+         source: str | Path | None | bool = None, stamp: bool = False, include_git: bool | None = None,
          dpi: int = 300, notes: str | None = None,
          max_data_bytes: int = DEFAULT_MAX_DATA_BYTES, savefig_kwargs: Mapping[str, Any] | None = None,
          ) -> dict[str, Path]:
@@ -80,9 +82,14 @@ def save(fig, name: str, data: Any = None, *, params: Mapping[str, Any] | None =
     params   anything worth recording (seeds, filters, model names...)
     source   the generating script; defaults to the caller's file or notebook.
              False omits source; notebook outputs and metadata are always omitted.
-    include_git  record commit and dirty state (no branch or remote URL)
-    Returns the written paths, keyed by format plus "plotpack".
+    stamp    also record when, and from which git commit, the figure was made (commit and dirty
+             state; no branch or remote URL). Off by default: then the same data, script and
+             parameters always give the same bytes, so a figure kept in git changes only when
+             what it shows changes. (`include_git=True` is the older name for this.)
+    Returns the written paths, keyed by format plus "plotpack". A file whose bytes would not
+    change is left alone.
     """
+    stamp = stamp or bool(include_git)
     if not name or name in (".", "..") or "/" in name or "\\" in name:
         raise ValueError("name must be a filename without directory components")
     formats = [f.lower().lstrip(".") for f in formats]
@@ -99,20 +106,72 @@ def save(fig, name: str, data: Any = None, *, params: Mapping[str, Any] | None =
     outdir.mkdir(parents=True, exist_ok=True)
     recipe = build_recipe(
         name=name, data=normalise_data(data, max_data_bytes), source=src, params=params,
-        git=git_state(origin) if include_git and origin else None, outputs=formats, notes=notes,
+        git=git_state(origin) if stamp and origin else None, outputs=formats, notes=notes, stamp=stamp,
     )
     kwargs = {"bbox_inches": "tight", **(savefig_kwargs or {})}
     paths: dict[str, Path] = {}
     for fmt in formats:
         p = outdir / f"{name}.{fmt}"
-        fig.savefig(p, **({"dpi": dpi} if fmt == "png" else {}), **kwargs)
+        _write_if_changed(p, embed_bytes(_render(fig, fmt, dpi, kwargs), recipe))
         paths[fmt] = p
     paths["plotpack"] = outdir / f"{name}.plotpack"
-    paths["plotpack"].write_bytes(recipe)
-    for fmt in formats:
-        if fmt in ("png", "svg", "pdf"):
-            embed_file(paths[fmt], recipe)
+    _write_if_changed(paths["plotpack"], recipe)
     return paths
+
+
+def _render(fig, fmt: str, dpi: int, kwargs: dict) -> bytes:
+    """The figure's bytes in one format. For Matplotlib, without the creation date it would
+    otherwise write and with fixed SVG ids, so the same figure always gives the same bytes."""
+    buf = io.BytesIO()
+    extra: dict[str, Any] = {"dpi": dpi} if fmt == "png" else {}
+    try:
+        import matplotlib
+        from matplotlib.figure import Figure
+    except ImportError:
+        Figure = None
+    if Figure is not None and isinstance(fig, Figure):
+        if "metadata" not in kwargs:
+            extra["metadata"] = {"pdf": {"CreationDate": None}, "svg": {"Date": None}}.get(fmt, {})
+        with matplotlib.rc_context({"svg.hashsalt": "plotpack"}), _stable_subset_names():
+            fig.savefig(buf, format=fmt, **extra, **kwargs)
+    else:
+        fig.savefig(buf, format=fmt, **extra, **kwargs)
+    return buf.getvalue()
+
+
+@contextlib.contextmanager
+def _stable_subset_names():
+    """Matplotlib names a PDF's font subsets (the "ABCDEF+" before a font's name) from Python's
+    hash() of the characters used; for text set with LaTeX it hashes a dict view, whose hash is
+    its memory address, so every run gives a new name. While plotpack saves, the name comes from
+    the characters themselves."""
+    try:
+        from matplotlib.backends.backend_pdf import PdfFile
+    except ImportError:
+        yield
+        return
+    original = PdfFile.__dict__.get("_get_subset_prefix")
+    if original is None:
+        yield
+        return
+
+    def prefix(charset):
+        digest = hashlib.sha256(repr(sorted(charset)).encode()).digest()
+        return "".join(chr(ord("A") + b % 26) for b in digest[:6]) + "+"
+
+    PdfFile._get_subset_prefix = staticmethod(prefix)
+    try:
+        yield
+    finally:
+        PdfFile._get_subset_prefix = original
+
+
+def _write_if_changed(path: Path, content: bytes) -> None:
+    if path.is_file() and path.read_bytes() == content:
+        return  # the same bytes: keep the file (and its modification time) as it is
+    pending = path.with_name(f".{path.name}.plotpack-tmp")
+    pending.write_bytes(content)
+    pending.replace(path)
 
 
 def attach(image: str | Path, data: Any = None, *, name: str | None = None,
@@ -129,7 +188,7 @@ def attach(image: str | Path, data: Any = None, *, name: str | None = None,
         src, origin = _caller_source(2)
     recipe = build_recipe(name=name or image.stem, data=normalise_data(data), source=src, params=params,
                           git=git_state(origin) if include_git and origin else None, outputs=[image.suffix.lstrip(".")],
-                          notes=notes)
+                          notes=notes, stamp=include_git)
     embed_file(image, recipe)
     return image
 
